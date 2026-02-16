@@ -10,23 +10,28 @@ import joblib
 
 
 # ==========================================================
-# PATHS
+# PATHS (Relative to script location)
 # ==========================================================
-YOLO_MODEL_PATH = r"C:\Users\Acer\Desktop\Auren\hooman test\runs\detect\oakd_yolov8n6\weights\best.pt"
-SVM_MODEL_PATH  = r"C:\Users\Acer\Desktop\Auren\hooman test\hog_svm_turn_slope.pkl"
+SCRIPT_DIR = Path(__file__).parent
+YOLO_MODEL_PATH = SCRIPT_DIR / "models" / "best.pt"
+SVM_MODEL_PATH = SCRIPT_DIR / "models" / "hog_svm_turn_slope.pkl"
 
 
 # ==========================================================
 # LOAD SVM
 # ==========================================================
-svm, label_encoder = joblib.load(SVM_MODEL_PATH)
-
+def load_svm_model():
+    """Load SVM model and label encoder"""
+    if not SVM_MODEL_PATH.exists():
+        raise FileNotFoundError(f"SVM model not found at {SVM_MODEL_PATH}")
+    return joblib.load(SVM_MODEL_PATH)
 
 
 # ==========================================================
 # HOG FEATURE EXTRACTOR
 # ==========================================================
 def extract_hog(cv2_img):
+    """Extract HOG features from image"""
     gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, (64, 64))
 
@@ -44,6 +49,7 @@ def extract_hog(cv2_img):
 # CLASSICAL SLOPE FALLBACK
 # ==========================================================
 def classify_hill_classical(cv2_crop):
+    """Classify slope using classical image processing as fallback"""
     gray = cv2.cvtColor(cv2_crop, cv2.COLOR_BGR2GRAY)
     arr = 255 - gray
 
@@ -68,7 +74,8 @@ def classify_hill_classical(cv2_crop):
 # ==========================================================
 # FINAL CLASSIFIER (HOG + SVM)
 # ==========================================================
-def classify_turn_or_slope(crop, sign_type):
+def classify_turn_or_slope(crop, sign_type, svm, label_encoder):
+    """Classify turn direction or slope using HOG+SVM with fallback"""
     feat = extract_hog(crop)
 
     pred_idx = svm.predict([feat])[0]
@@ -90,6 +97,7 @@ def classify_turn_or_slope(crop, sign_type):
 
     return "unknown"
 
+
 # ==========================================================
 # OAK-D + YOLOv8
 # ==========================================================
@@ -108,8 +116,11 @@ class OAKCameraYOLOv8Custom:
         self.colors = rng.integers(0, 255, (len(self.classes), 3)).tolist()
 
         self.pipeline = self.create_pipeline()
+        self.svm = None
+        self.label_encoder = None
 
     def create_pipeline(self):
+        """Create DepthAI pipeline for OAK-D camera"""
         pipeline = dai.Pipeline()
 
         cam = pipeline.create(dai.node.ColorCamera)
@@ -124,12 +135,20 @@ class OAKCameraYOLOv8Custom:
         cam.preview.link(xout.input)
         return pipeline
 
-    def load_yolo(self):
+    def load_models(self):
+        """Load YOLO and SVM models"""
         from ultralytics import YOLO
-        self.model = YOLO(self.model_path)
-        print("YOLOv8 loaded")
+        
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"YOLO model not found at {self.model_path}")
+        
+        self.model = YOLO(str(self.model_path))
+        self.svm, self.label_encoder = load_svm_model()
+        print("✓ YOLOv8 model loaded")
+        print("✓ SVM model loaded")
 
     def process_frame(self, frame):
+        """Process frame and return detections"""
         detections = []
         results = self.model(frame, verbose=False)
 
@@ -157,7 +176,7 @@ class OAKCameraYOLOv8Custom:
 
                 if cls_name in ["turn", "slope"] and crop.size > 0:
                     det["direction"] = classify_turn_or_slope(
-                        crop, cls_name
+                        crop, cls_name, self.svm, self.label_encoder
                     )
 
                 detections.append(det)
@@ -165,6 +184,7 @@ class OAKCameraYOLOv8Custom:
         return detections
 
     def draw(self, frame, detections):
+        """Draw bounding boxes and labels on frame"""
         for d in detections:
             x1, y1, x2, y2 = d["bbox"]
             color = tuple(map(int, self.colors[d["class_id"]]))
@@ -181,11 +201,13 @@ class OAKCameraYOLOv8Custom:
         return frame
 
     def run(self):
+        """Main loop for camera processing"""
         device = dai.Device(self.pipeline)
         q = device.getOutputQueue("rgb", 4, False)
 
-        self.load_yolo()
-        print("OAK-D running")
+        self.load_models()
+        print("\n🎥 OAK-D camera running...")
+        print("Press 'q' to quit\n")
 
         while True:
             pkt = q.tryGet()
@@ -196,7 +218,7 @@ class OAKCameraYOLOv8Custom:
             detections = self.process_frame(frame)
             frame = self.draw(frame, detections)
 
-            cv2.imshow("YOLOv8 + HOG + SVM", frame)
+            cv2.imshow("Traffic Sign Detection - YOLOv8 + HOG + SVM", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
@@ -207,16 +229,22 @@ class OAKCameraYOLOv8Custom:
 # MAIN
 # ==========================================================
 def main():
-    if not Path(YOLO_MODEL_PATH).exists():
-        print("YOLO model not found")
-        return
-
-    if not Path(SVM_MODEL_PATH).exists():
-        print("SVM model not found")
-        return
-
-    oak = OAKCameraYOLOv8Custom(YOLO_MODEL_PATH)
-    oak.run()
+    """Main entry point"""
+    print("=" * 60)
+    print("Traffic Sign Detection System")
+    print("OAK-D Camera + YOLOv8 + HOG + SVM")
+    print("=" * 60)
+    
+    try:
+        oak = OAKCameraYOLOv8Custom(YOLO_MODEL_PATH)
+        oak.run()
+    except FileNotFoundError as e:
+        print(f"\n❌ Error: {e}")
+        print("\nPlease ensure your models are in the 'models' directory:")
+        print(f"  - {YOLO_MODEL_PATH}")
+        print(f"  - {SVM_MODEL_PATH}")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
 
 
 if __name__ == "__main__":
